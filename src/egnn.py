@@ -256,8 +256,11 @@ class EGNN(Module):
             in_channels=hidden_channels[-1],
             hidden_channels=MLP_hidden_channels,
             out_channels=output_channels,
-            num_layers=MLP_num_layers
+            num_layers=MLP_num_layers,
+            norm=None,               # <- important: no BatchNorm
+            dropout=0.0
         )
+
 
     def forward(self, x, edge_index, batch, edge_attr=None, pos=None):
         h, coord = x, pos

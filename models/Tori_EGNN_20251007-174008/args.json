@@ -1,0 +1,21 @@
+{
+  "datasets": [
+    "Tori"
+  ],
+  "model_type": "EGNN",
+  "hidden_channels": [
+    64,
+    128,
+    256
+  ],
+  "mlp_hidden": 64,
+  "mlp_layers": 2,
+  "batch_size": 4,
+  "epochs": 50,
+  "lr": 0.001,
+  "scheduler": "Cos",
+  "loss_fn": "L2",
+  "device": "cuda",
+  "dataset_pt": "/scratch/bdbq/mcampos1/eigenEGNN_model/data_processed/processed_Tori.pt",
+  "y_dim": 10
+}

@@ -9,7 +9,7 @@ import warnings
 import sys
 import time
 from pathlib import Path
-
+from tqdm import tqdm
 import numpy as np
 import torch
 import torch.multiprocessing as mp
@@ -29,9 +29,32 @@ from settings import NUM_EIGS, DEVICE
 mp.set_start_method('spawn', force=True)
 warnings.filterwarnings('ignore', category=UserWarning, message='TypedStorage is deprecated')
 
+def _ensure_target_shape(out, y, n_graphs: int):
+    # out: [B, out_dim]
+    out_dim = out.shape[1]
+    if y.ndim == 1:
+        # flatten case: [B*out_dim] -> [B, out_dim]
+        if y.numel() == n_graphs * out_dim:
+            y = y.view(n_graphs, out_dim)
+        elif y.numel() == out_dim:
+            y = y.unsqueeze(0)
+        else:
+            raise ValueError(f"Unexpected y shape {tuple(y.shape)} for batch {n_graphs} and out_dim {out_dim}")
+    elif y.ndim == 2:
+        # expected: [B, out_dim] or [1, out_dim] when B==1
+        if y.size(0) == 1 and n_graphs > 1 and y.size(1) == n_graphs * out_dim:
+            y = y.view(n_graphs, out_dim)  # super defensive fallback
+        elif not ( (y.size(0) == n_graphs and y.size(1) == out_dim) or
+                (n_graphs == 1 and y.size(0) == 1 and y.size(1) == out_dim) ):
+            raise ValueError(f"Unexpected y shape {tuple(y.shape)} for batch {n_graphs} and out_dim {out_dim}")
+    else:
+        raise ValueError(f"Unexpected y ndim {y.ndim}")
+
+    assert y.shape[1] == out_dim, f"Output dim {out_dim} != target dim {y.shape[1]}"
+    return y
 
 def safe_load_pt(pt_path):
-    """Handle PyTorch 2.6 'weights_only=True' default when loading a list[Data]."""
+    """Handle PyTorch 2.6 'weights_only=True' default when loading a list[Data], nonesense that I had to include to avoid errors"""
     try:
         from torch_geometric.data import Data
         try:
@@ -46,23 +69,96 @@ def safe_load_pt(pt_path):
         return torch.load(pt_path, map_location="cpu", weights_only=False)
 
 
-def build_loaders_from_pt(pt_path, batch_size, seed=0xC0FFEE):
+def _filter_graphs_with_y(graphs, expected_dim=None):
+    """Keep graphs that have a graph-level y; ensure each y is [1, D]."""
+    valid = []
+    dropped = 0
+    for g in graphs:
+        y = getattr(g, "y", None)
+        if y is None:
+            dropped += 1
+            continue
+        y = y if torch.is_tensor(y) else torch.tensor(y)
+
+        # normalize shape: always [1, D]
+        if y.ndim == 1:
+            d = y.numel()
+            y = y.unsqueeze(0)      # [1, D]
+        elif y.ndim == 2 and y.size(0) == 1:
+            d = y.size(1)           # already [1, D]
+        else:
+            dropped += 1
+            continue
+
+        if expected_dim is not None and d != expected_dim:
+            dropped += 1
+            continue
+
+        g.y = y                     # keep as [1, D]
+        valid.append(g)
+
+    return valid, dropped
+
+def build_loaders_from_pt(
+    pt_path,
+    batch_size,
+    seed=0xC0FFEE,
+    expected_y_dim=None,
+    train_workers: int = 0,
+    eval_workers: int = 0,
+    pin_memory: bool = False,
+):
     graphs = safe_load_pt(pt_path)
     if not isinstance(graphs, (list, tuple)) or len(graphs) == 0:
         raise ValueError(f"Loaded object from {pt_path} is empty or not a list[Data].")
+
+    # ensure y present (and correct dim if requested)
+    graphs, dropped = _filter_graphs_with_y(graphs, expected_dim=expected_y_dim)
+    if len(graphs) == 0:
+        raise ValueError("All graphs were dropped (no valid y). Rebuild your .pt with targets or relax filtering.")
+    if dropped:
+        print(f"[warn] Dropped {dropped} graphs without valid y. Using {len(graphs)} graphs.")
 
     total = len(graphs)
     train_size = int(total * 0.8)
     val_size   = int(total * 0.1)
     test_size  = total - train_size - val_size
     g = torch.Generator().manual_seed(seed)
-    train_dataset, val_dataset, test_dataset = random_split(graphs, [train_size, val_size, test_size], generator=g)
+    train_dataset, val_dataset, test_dataset = random_split(
+        graphs, [train_size, val_size, test_size], generator=g
+    )
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,  num_workers=8, pin_memory=True)
-    val_loader   = DataLoader(val_dataset,   batch_size=1,         shuffle=False, num_workers=4, pin_memory=True)
-    test_loader  = DataLoader(test_dataset,  batch_size=1,         shuffle=False, num_workers=4, pin_memory=True)
+    # persistent_workers must be False if num_workers == 0
+    train_persist = train_workers > 0
+    eval_persist  = eval_workers > 0
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=train_workers,
+        pin_memory=pin_memory,
+        persistent_workers=train_persist,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=eval_workers,
+        pin_memory=pin_memory,
+        persistent_workers=eval_persist,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=eval_workers,
+        pin_memory=pin_memory,
+        persistent_workers=eval_persist,
+    )
 
     return graphs, train_loader, val_loader, test_loader
+
 
 
 def init_egnn(in_channels, out_channels, hidden_channels, mlp_hidden, mlp_layers, device):
@@ -110,14 +206,17 @@ def pick_criterion(loss_name):
     else:
         raise ValueError("loss_fn must be one of: RPD, Polar, Polar2, L1, L2")
 
+# TODO: Clean up the args later.....
 
 def run(
+    args,
     workspace="/scratch/bdbq/mcampos1/eigenEGNN_model",
     output_dir="models",
     batch_size=32,
     datasets=("Tori",),
     scheduler="Cos",
     loss_fn="L2",
+    verbose=1,
     lr=1e-3,
     epochs=5,
     model_type="EGNN",
@@ -154,12 +253,32 @@ def run(
         pt_path = str(cands[0])
     print(f"[info] Using cached dataset: {pt_path}")
 
-    # load graphs + loaders
-    graphs, train_loader, val_loader, test_loader = build_loaders_from_pt(pt_path, batch_size=batch_size)
+    # First, load graphs just to infer y dimension
+    graphs_peek = safe_load_pt(pt_path)
+    if not graphs_peek:
+        raise ValueError("Empty dataset.")
+    # infer y dimension from first graph that has y
+    y_dim = None
+    for g in graphs_peek:
+        if getattr(g, "y", None) is not None:
+            y = g.y if torch.is_tensor(g.y) else torch.tensor(g.y)
+            y_dim = y.numel() if y.ndim == 1 else y.size(-1)
+            break
+    if y_dim is None:
+        raise ValueError("No graphs have 'y' in this dataset; preprocess with eigs to add targets.")
+    print(f"[info] Inferred target dimension from dataset: y_dim={y_dim}")
+
+    graphs, train_loader, val_loader, test_loader = build_loaders_from_pt(
+        pt_path, batch_size=batch_size, expected_y_dim=y_dim,
+        train_workers=args.workers, eval_workers=args.eval_workers,
+        pin_memory=args.pin_memory
+    )
+
+
 
     g0 = graphs[0]
     print(f"[info] First graph: nodes={g0.num_nodes}, edges={g0.num_edges}, "
-          f"x={tuple(g0.x.shape) if g0.x is not None else None}, pos={tuple(g0.pos.shape)}")
+          f"x={tuple(g0.x.shape) if g0.x is not None else None}, pos={tuple(g0.pos.shape)}, y_dim={y_dim}")
 
     t2 = time.time()
     print(f"Datasets loaded in {t2 - start_time:.2f} seconds.")
@@ -187,6 +306,7 @@ def run(
             "loss_fn": loss_fn,
             "device": str(DEVICE),
             "dataset_pt": pt_path,
+            "y_dim": y_dim,
         }, f, indent=2)
     print(f"Run dir: {run_dir}")
 
@@ -194,7 +314,7 @@ def run(
 
     # infer in/out channels from your task
     in_channels = g0.x.size(1) if g0.x is not None else 1
-    out_channels = NUM_EIGS  # <- set to your task (e.g., NUM_EIGS). Change as needed.
+    out_channels = y_dim  # <--- predict exactly as many values as provided
 
     # init model
     model = init_egnn(
@@ -220,11 +340,8 @@ def run(
         print(f"torch version: {torch.__version__}. using CPU")
 
     # ---------- train & test ----------
-    def forward_for_task(data):
-        # EGNN path: edge_index + pos
-        return model(data.x, data.edge_index, data.batch, pos=data.pos)
 
-    def train_epoch(loader):
+    def train_epoch(loader, verbose):
         model.train()
         size_count = 0
         loss_accum = 0.0
@@ -235,23 +352,24 @@ def run(
         l1_sum = 0.0
         l2_sum = 0.0
 
-        for data in loader:
+        iterator = tqdm(loader, desc="Training", leave=False) if verbose == 2 else loader
+
+        for data in iterator:
             data = data.to(device, non_blocking=True)
-            out = forward_for_task(data)
+            out =  model(data.x, data.edge_index, data.batch, pos=data.pos)
             n = out.size(0)
-
-            # Expect data.y as graph-level labels; if missing, skip
-            if getattr(data, "y", None) is None:
-                print("[warn] Batch has no 'y' labels; skipping (flow-only).")
+            target = getattr(data, "y", None)
+            if target is None:
+                print("[warn] Batch has no 'y' labels; skipping.")
                 continue
+            target = _ensure_target_shape(out, target.to(device), n)
 
-            target = torch.reshape(data.y, (n, -1)).to(device)
             loss = criterion(out, target)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             optimizer.step()
 
-            # metrics (optional; safe even for L1/L2)
+            # metrics (optional)
             with torch.no_grad():
                 loss_accum += loss.item() * n
                 size_count += n
@@ -292,7 +410,7 @@ def run(
         )
 
     @torch.no_grad()
-    def eval_epoch(loader):
+    def eval_epoch(loader, verbose):
         model.eval()
         size_count = 0
         loss_sum = 0.0
@@ -303,16 +421,18 @@ def run(
         l1_sum = 0.0
         l2_sum = 0.0
 
-        for data in loader:
+        iterator = tqdm(loader, desc="Training", leave=False) if verbose == 2 else loader
+
+        for data in iterator:
             data = data.to(device, non_blocking=True)
-            out = forward_for_task(data)
+            out =  model(data.x, data.edge_index, data.batch, pos=data.pos)
             n = out.size(0)
-
-            if getattr(data, "y", None) is None:
-                print("[warn] Batch has no 'y' labels; skipping (flow-only).")
+            target = getattr(data, "y", None)
+            if target is None:
+                print("[warn] Batch has no 'y' labels; skipping.")
                 continue
+            target = _ensure_target_shape(out, target.to(device), n)
 
-            target = torch.reshape(data.y, (n, -1)).to(device)
             loss = criterion(out, target)
             loss_sum += loss.item() * n
             size_count += n
@@ -360,8 +480,8 @@ def run(
 
     for epoch in range(epochs):
         epoch_start = time.time()
-        tr = train_epoch(train_loader)
-        va = eval_epoch(val_loader)
+        tr = train_epoch(train_loader, verbose)
+        va = eval_epoch(val_loader, verbose)
 
         # unpack
         (train_loss, train_acc, train_rpd, train_pl, train_qtls, train_psnr,
@@ -373,6 +493,7 @@ def run(
         with open(metrics_csv, "a") as f:
             f.write(f"{epoch},train,{train_loss:.6e},{train_acc:.6f},{train_rpd:.6e},{train_pl:.6e},"
                     f"\"{train_qtls}\",{train_psnr:.6f},{train_inv_lap:.6e},{train_l1:.6e},{train_l2:.6e}\n")
+        with open(metrics_csv, "a") as f:
             f.write(f"{epoch},val,{val_loss:.6e},{val_acc:.6f},{val_rpd:.6e},{val_pl:.6e},"
                     f"\"{val_qtls}\",{val_psnr:.6f},{val_inv_lap:.6e},{val_l1:.6e},{val_l2:.6e}\n")
 
@@ -403,7 +524,7 @@ def run(
     torch.save(model.state_dict(), os.path.join(run_dir, "last_model.pt"))
 
     # test
-    test_metrics = eval_epoch(test_loader)
+    test_metrics = eval_epoch(test_loader, verbose)
     (test_loss, test_acc, test_rpd, test_pl, test_qtls, test_psnr,
      test_inv_lap, test_l1, test_l2) = test_metrics
 
@@ -440,14 +561,25 @@ if __name__ == "__main__":
     parser.add_argument("--datasets", nargs="+", default=["test"], choices=["Synth", "Thingi10k", "Tori", "SHREC", "test"])
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--loss", dest="loss_fn", default="L2", choices=["RPD", "Polar", "Polar2", "L1", "L2"])
+    parser.add_argument("--verbose", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--scheduler", default="Cos", choices=["Cos", "Exp"])
-    parser.add_argument("--hidden", nargs="+", type=int, default=[64, 128, 256])
+    parser.add_argument("--hidden", nargs="+", type=int, default=[32, 64, 128])
     parser.add_argument("--mlp-hidden", dest="mlp_hidden", type=int, default=64)
-    parser.add_argument("--mlp-layers", dest="mlp_layers", type=int, default=5)
+    parser.add_argument("--mlp-layers", dest="mlp_layers", type=int, default=2)
+
+    parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--eval-workers", type=int, default=0)
+    parser.add_argument("--pin-memory", dest="pin_memory", action="store_true")
+    parser.add_argument("--no-pin-memory", dest="pin_memory", action="store_false")
+    parser.set_defaults(pin_memory=False)  # safer default on shared nodes
+    parser.add_argument("--amp", action="store_true",
+                        help="Use automatic mixed precision (saves GPU mem)")
+
+
     args = parser.parse_args()
 
-    run(
+    run(args=args,
         workspace=args.workspace,
         output_dir=args.output_dir,
         batch_size=args.batch,
@@ -455,6 +587,7 @@ if __name__ == "__main__":
         scheduler=args.scheduler,
         loss_fn=args.loss_fn,
         lr=args.lr,
+        verbose=args.verbose,
         epochs=args.epochs,
         model_type="EGNN",
         hidden_channels=tuple(args.hidden),

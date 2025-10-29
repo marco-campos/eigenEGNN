@@ -1,0 +1,11 @@
+{
+  "loss": NaN,
+  "acc": 0.0,
+  "rpd": NaN,
+  "polar": NaN,
+  "psnr_quantiles": "[nan, nan, nan, nan, nan]",
+  "psnr_mean": NaN,
+  "inv_lap": NaN,
+  "l1": NaN,
+  "l2": NaN
+}

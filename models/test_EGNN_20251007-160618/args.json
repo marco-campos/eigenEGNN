@@ -1,0 +1,21 @@
+{
+  "datasets": [
+    "test"
+  ],
+  "model_type": "EGNN",
+  "hidden_channels": [
+    64,
+    128,
+    256
+  ],
+  "mlp_hidden": 64,
+  "mlp_layers": 2,
+  "batch_size": 2,
+  "epochs": 2,
+  "lr": 0.001,
+  "scheduler": "Cos",
+  "loss_fn": "L2",
+  "device": "cuda",
+  "dataset_pt": "/scratch/bdbq/mcampos1/eigenEGNN_model/data_processed/processed_test.pt",
+  "y_dim": 10
+}
