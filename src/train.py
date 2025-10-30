@@ -18,7 +18,6 @@ from torch.nn import L1Loss, MSELoss
 from torch.utils.data import random_split
 from torch_geometric.loader import DataLoader
 
-# --- your utilities & settings ---
 from accuracy import (
     PSNR, RPD, PolarLoss, Polar2Loss, RPDLoss, SmoothRPDLoss,
     inv_lap, l2_error, polar_loss,
@@ -112,7 +111,6 @@ def build_loaders_from_pt(
     if not isinstance(graphs, (list, tuple)) or len(graphs) == 0:
         raise ValueError(f"Loaded object from {pt_path} is empty or not a list[Data].")
 
-    # ensure y present (and correct dim if requested)
     graphs, dropped = _filter_graphs_with_y(graphs, expected_dim=expected_y_dim)
     if len(graphs) == 0:
         raise ValueError("All graphs were dropped (no valid y). Rebuild your .pt with targets or relax filtering.")
@@ -161,6 +159,7 @@ def build_loaders_from_pt(
 
 
 def pick_optimizer_and_scheduler(model, lr, scheduler_choice):
+    # Lol SGD didn't work
     # optimizer = torch.optim.SGD(
     #     model.parameters(),
     #     lr=lr,
@@ -234,7 +233,6 @@ def run(
     torch.manual_seed(0xDEADBEEF)
     torch.cuda.manual_seed(0xDEADBEEF)
 
-    # pick the cached dataset
     dataset_name = datasets[0]
     preferred_path = osp.join(workspace, "data_processed", f"processed_{dataset_name}.pt")
     if osp.exists(preferred_path):
@@ -307,7 +305,7 @@ def run(
 
     # infer in/out channels from your task
     in_channels = g0.x.size(1) if g0.x is not None else 1
-    out_channels = y_dim  # <--- predict exactly as many values as provided
+    out_channels = y_dim  
 
     model = EGNN(
         input_channels=in_channels,
@@ -323,7 +321,6 @@ def run(
 
     print("Model loaded")
 
-    # optimizer & scheduler & criterion
     optimizer, scheduler1 = pick_optimizer_and_scheduler(model, lr, scheduler)
     criterion = pick_criterion(loss_fn)
     print("Optimizer and scheduler loaded")
