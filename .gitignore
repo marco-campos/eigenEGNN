@@ -2,3 +2,7 @@
 logs
 *.err
 *.out
+/models
+output_dir/
+.pyc
+*.sbatch

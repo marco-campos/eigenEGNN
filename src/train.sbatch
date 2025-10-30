@@ -5,7 +5,7 @@
 #SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=12
 #SBATCH --mem=40G
-#SBATCH --time=00:20:00
+#SBATCH --time=08:00:00
 #SBATCH --constraint=scratch&projects
 #SBATCH --job-name=test_egnn
 #SBATCH --output=slurm-test-egnn-%j.out
@@ -17,10 +17,10 @@ set -euo pipefail
 WORKSPACE="/scratch/bdbq/mcampos1/eigenEGNN_model"     # repo root
 DATA_NAME="Tori"                                    # train.py expects processed_${DATA_NAME}.pt
 PT_DIR="${WORKSPACE}/data_processed"
-WALL_EPOCHS=2                                          # small smoke test
+WALL_EPOCHS=100                                          # small smoke test
 BATCH=2                                                # tiny batch is fine for sanity run
 LR=1e-3
-LOSS="L2"
+LOSS=${LOSS:-"L2"}   # default to L2 if not provided
 SCHED="Cos"
 HIDDEN="64 128 256"                                    # keep default EGNN hidden sizes
 MLP_HID=64

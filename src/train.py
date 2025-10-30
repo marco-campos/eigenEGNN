@@ -176,12 +176,19 @@ def init_egnn(in_channels, out_channels, hidden_channels, mlp_hidden, mlp_layers
 
 
 def pick_optimizer_and_scheduler(model, lr, scheduler_choice):
-    optimizer = torch.optim.SGD(
+    # optimizer = torch.optim.SGD(
+    #     model.parameters(),
+    #     lr=lr,
+    #     momentum=0.9,
+    #     weight_decay=1e-5,
+    # )
+
+    optimizer = torch.optim.Adam(
         model.parameters(),
         lr=lr,
-        momentum=0.9,
         weight_decay=1e-5,
     )
+
     if scheduler_choice == "Cos":
         scheduler1 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 20, eta_min=1e-8)
     elif scheduler_choice == "Exp":
@@ -478,6 +485,11 @@ def run(
     with open(metrics_csv, "w") as f:
         f.write("epoch,split,loss,acc,rpd,polar,psnr_qtls,psnr_mean,inv_lap,l1,l2\n")
 
+    patience = 30
+    best_val_loss = float("inf")
+    epochs_no_improve = 0
+    early_stop = False
+
     for epoch in range(epochs):
         epoch_start = time.time()
         tr = train_epoch(train_loader, verbose)
@@ -502,6 +514,19 @@ def run(
             best_val_acc = val_acc
             best_state = model.state_dict()
 
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            # best_state = model.state_dict()
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+
+
+        if epochs_no_improve >= patience:
+            print(f"Early stopping triggered after {epoch+1} epochs with no improvement.")
+            early_stop = True
+            break
+
         # step scheduler
         scheduler1.step()
         epoch_end = time.time()
@@ -517,6 +542,9 @@ def run(
             if best_state is not None:
                 torch.save(best_state, os.path.join(run_dir, "best.abs.pt"))
             torch.save(model.state_dict(), os.path.join(run_dir, f"model-{epoch:03d}.pt"))
+    
+    if early_stop:
+        print(f"Stopped early at epoch {epoch+1}")
 
     # final saves
     if best_state is not None:
@@ -558,11 +586,11 @@ if __name__ == "__main__":
     parser.add_argument("--workspace", type=str, default="/scratch/bdbq/mcampos1/eigenEGNN_model")
     parser.add_argument("--output_dir", type=str, default="models")
     parser.add_argument("--batch", type=int, default=32)
-    parser.add_argument("--datasets", nargs="+", default=["test"], choices=["Synth", "Thingi10k", "Tori", "SHREC", "test"])
+    parser.add_argument("--datasets", nargs="+", default=["test"], choices=["Synth", "Thingi10k", "Tori", "SHREC", "test", "ModelNet10"])
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--loss", dest="loss_fn", default="L2", choices=["RPD", "Polar", "Polar2", "L1", "L2"])
     parser.add_argument("--verbose", type=int, default=1)
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--scheduler", default="Cos", choices=["Cos", "Exp"])
     parser.add_argument("--hidden", nargs="+", type=int, default=[32, 64, 128])
     parser.add_argument("--mlp-hidden", dest="mlp_hidden", type=int, default=64)
