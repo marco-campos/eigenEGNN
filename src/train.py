@@ -160,21 +160,6 @@ def build_loaders_from_pt(
     return graphs, train_loader, val_loader, test_loader
 
 
-
-def init_egnn(in_channels, out_channels, hidden_channels, mlp_hidden, mlp_layers, device):
-    model = EGNN(
-        input_channels=in_channels,
-        output_channels=out_channels,
-        hidden_channels=hidden_channels,
-        MLP_hidden_channels=mlp_hidden,
-        MLP_num_layers=mlp_layers,
-        edge_features_dim=0,
-        coords_agg='mean',
-        act_fn=torch.nn.SiLU()
-    ).to(device)
-    return model
-
-
 def pick_optimizer_and_scheduler(model, lr, scheduler_choice):
     # optimizer = torch.optim.SGD(
     #     model.parameters(),
@@ -230,6 +215,7 @@ def run(
     hidden_channels=(64, 128, 256),
     MLP_hidden_channels=64,
     MLP_num_layers=5,
+    dropout=0.5
 ):
     print("The job started at", time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()))
     start_time = time.time()
@@ -323,15 +309,18 @@ def run(
     in_channels = g0.x.size(1) if g0.x is not None else 1
     out_channels = y_dim  # <--- predict exactly as many values as provided
 
-    # init model
-    model = init_egnn(
-        in_channels=in_channels,
-        out_channels=out_channels,
+    model = EGNN(
+        input_channels=in_channels,
+        output_channels=out_channels,
         hidden_channels=list(hidden_channels),
-        mlp_hidden=MLP_hidden_channels,
-        mlp_layers=MLP_num_layers,
-        device=device,
-    )
+        MLP_hidden_channels=MLP_hidden_channels,
+        MLP_num_layers=MLP_num_layers,
+        edge_features_dim=0,
+        coords_agg='mean',
+        act_fn=torch.nn.SiLU(),
+        dropout=dropout
+    ).to(device)
+
     print("Model loaded")
 
     # optimizer & scheduler & criterion
@@ -591,6 +580,7 @@ if __name__ == "__main__":
     parser.add_argument("--loss", dest="loss_fn", default="L2", choices=["RPD", "Polar", "Polar2", "L1", "L2"])
     parser.add_argument("--verbose", type=int, default=1)
     parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--scheduler", default="Cos", choices=["Cos", "Exp"])
     parser.add_argument("--hidden", nargs="+", type=int, default=[32, 64, 128])
     parser.add_argument("--mlp-hidden", dest="mlp_hidden", type=int, default=64)
@@ -621,4 +611,5 @@ if __name__ == "__main__":
         hidden_channels=tuple(args.hidden),
         MLP_hidden_channels=args.mlp_hidden,
         MLP_num_layers=args.mlp_layers,
+        dropout=args.dropout
     )

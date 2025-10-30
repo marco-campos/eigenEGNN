@@ -225,11 +225,12 @@ class EGNN(Module):
         MLP_num_layers=10,
         edge_features_dim=0,
         coords_agg='mean',
-        act_fn=torch.nn.SiLU()
+        act_fn=torch.nn.SiLU(),
+        dropout=0.5
     ):
         super().__init__()
         torch.manual_seed(0xDEADBEEF)
-
+        self.dropout=dropout
         self.embedding_in = Linear(input_channels, hidden_channels[0])
         self.embedding_out = Linear(hidden_channels[-1], hidden_channels[-1])
 
@@ -272,7 +273,7 @@ class EGNN(Module):
         h = self.embedding_out(h)
 
         h_pooled = global_mean_pool(h, batch)
-        h_pooled = F.dropout(h_pooled, p=0.5, training=self.training)
+        h_pooled = F.dropout(h_pooled, p=self.dropout, training=self.training)
         return self.mlp(h_pooled)
 
 
